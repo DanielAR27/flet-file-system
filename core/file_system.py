@@ -230,12 +230,19 @@ class FileSystem:
 
         # Verificar si el archivo ya existe
         existing_node = parent_dir.children.get(name)
+        old_sectors = []
         if existing_node:
             if existing_node.is_directory:
                 raise FileExistsConflictException(f"Ya existe un directorio con el nombre '{name}'.")
             if not overwrite:
                 raise FileExistsConflictException(f"El archivo '{name}' ya existe en el directorio de destino.")
             
+            # Recordar la cadena de sectores para posible rollback
+            if existing_node.first_sector >= 0:
+                curr = existing_node.first_sector
+                while curr >= 0:
+                    old_sectors.append(curr)
+                    curr = self.disk.fat[curr]
             # Liberar sectores anteriores del archivo a sobreescribir
             self.disk.free_file_sectors(existing_node.first_sector)
             file_node = existing_node
@@ -245,7 +252,12 @@ class FileSystem:
         # Asignar nuevos sectores para el contenido (First Fit)
         allocated_sectors = self.disk.allocate_file_sectors(len(data))
         if not allocated_sectors:
-            raise DiskFullException("Error: No hay suficientes sectores libres para guardar este archivo.")
+            # Rollback si era archivo existente
+            if existing_node and old_sectors:
+                for i in range(len(old_sectors) - 1):
+                    self.disk.fat[old_sectors[i]] = old_sectors[i+1]
+                self.disk.fat[old_sectors[-1]] = -2
+            raise DiskFullException("Error: No hay suficiente espacio.")
 
         # Escribir los datos por fragmentos en los sectores asignados
         for i, sector_idx in enumerate(allocated_sectors):
@@ -269,19 +281,18 @@ class FileSystem:
         """
         Determina de manera robusta si una ruta es virtual (dentro de nuestro FS) o real (del SO).
         """
+        if ":" in path:
+            return False
+        if "\\" in path:
+            return False
         if path.startswith("/"):
             return True
-        if "\\" in path or ":" in path:
+        
+        # Si existe físicamente y no está resuelto virtualmente, asumimos real
+        if os.path.exists(path) and self.resolve_virtual_path(path) is None:
             return False
-        # Si resuelve directamente en el FS virtual, es virtual
-        if self.resolve_virtual_path(path) is not None:
-            return True
-        # Si el padre de la ruta resuelve en el FS virtual, es virtual (caso de archivo nuevo)
-        parent_path = os.path.dirname(path)
-        if parent_path and self.resolve_virtual_path(parent_path) is not None:
-            return True
-        # Por defecto, si no resuelve en el FS y no tiene sintaxis de Windows, lo tratamos como real
-        return False
+            
+        return True
 
     def cmd_copy(self, src_path: str, dest_path: str, overwrite: bool = False) -> str:
         """
@@ -640,6 +651,19 @@ class FileSystem:
         lines.append(f"  {num_dirs} directorio(s), {num_files} archivo(s)")
         return "\n".join(lines)
 
+    def cmd_tree(self) -> str:
+        """
+        Retorna la representación en forma de árbol del File System virtual.
+        """
+        structure = self.get_tree_structure()
+        lines = []
+        for prefix, name, is_dir, _ in structure:
+            prefix_str = "".join(prefix)
+            icon = "📁 " if is_dir else "📄 "
+            lines.append(f"{prefix_str}{icon}{name}")
+        
+        return "\n".join(lines)
+
     def cmd_find(self, pattern: str, start_path: str = None) -> str:
         """
         Busca archivos y directorios por nombre usando el patrón dado.
@@ -802,6 +826,46 @@ class FileSystem:
         data = new_content.encode("utf-8")
         self.write_virtual_file_content(target.parent, target.name, data, overwrite=True)
         return f"Archivo '{self.get_path_for_node(target)}' modificado exitosamente ({len(data)} bytes)."
+
+    def cmd_mapa(self) -> str:
+        """
+        Imprime el estado de la FAT sector por sector.
+        Muestra la asignación para verificar que First Fit funciona correctamente.
+        Valores: Libre = sector disponible, EOF = fin de archivo, número = siguiente sector.
+        """
+        if not self.disk.is_initialized:
+            raise FileSystemException("El disco virtual no está inicializado. Use CREATE primero.")
+
+        fat = self.disk.fat
+        header = "─" * 60
+        lines = ["Estado de la FAT (File Allocation Table):", header]
+        
+        raw_parts = []
+        for i, val in enumerate(fat):
+            if val == -1:
+                state = "Libre"
+            elif val == -2:
+                state = "EOF"
+            else:
+                state = f"→ {val}"
+            raw_parts.append(f"[ {i} ] {state}")
+
+        max_part_len = max(len(p) for p in raw_parts)
+        parts = []
+        for p in raw_parts:
+            parts.append(f"{p:<{max_part_len}}")
+            if len(parts) == 4:
+                lines.append("  " + "   ".join(parts))
+                parts = []
+
+        if parts:
+            lines.append("  " + "   ".join(parts))
+
+        free = self.disk.get_free_sectors_count()
+        used = self.disk.num_sectors - free
+        lines.append(header)
+        lines.append(f"  Total: {self.disk.num_sectors} sectores  |  Usados: {used}  |  Libres: {free}")
+        return "\n".join(lines)
 
     def cmd_verfile(self, path: str) -> str:
         """

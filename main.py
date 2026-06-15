@@ -1,5 +1,8 @@
 import flet as ft
 import os
+import shlex
+import threading
+import asyncio
 from core.file_system import (
     FileSystem, 
     FileSystemException, 
@@ -141,6 +144,22 @@ def main(page: ft.Page):
         padding=10
     )
 
+    # ── Helpers para abrir/cerrar diálogos (Flet 0.85.x) ──────────────────────
+    def open_dialog(dlg):
+        try:
+            page.show_dialog(dlg)
+        except Exception as ex:
+            if "already opened" in str(ex):
+                dlg.open = True
+                dlg.update()
+
+    def close_dialog(dlg):
+        try:
+            dlg.open = False
+            dlg.update()
+        except Exception:
+            pass
+
     # Diálogo de Confirmación para Sobrescritura
     def handle_confirm_yes(e):
         nonlocal pending_action
@@ -149,11 +168,13 @@ def main(page: ft.Page):
         if pending_action:
             try:
                 result_message = pending_action(True)
-                log_area.controls.append(ft.Text(result_message, color="#81c784"))
+                log_area.controls.append(ft.Text(result_message, color="#81c784", font_family="monospace"))
             except FileSystemException as ex:
-                log_area.controls.append(ft.Text(f"Error: {str(ex)}", color="#e57373"))
+                msg = str(ex)
+                display_msg = msg if msg.startswith("Error") else f"Error: {msg}"
+                log_area.controls.append(ft.Text(display_msg, color="#e57373", font_family="monospace"))
             except Exception as ex:
-                log_area.controls.append(ft.Text(f"Error inesperado: {str(ex)}", color="#e57373"))
+                log_area.controls.append(ft.Text(f"Error inesperado: {str(ex)}", color="#e57373", font_family="monospace"))
             
             pending_action = None
             update_ui()
@@ -168,167 +189,282 @@ def main(page: ft.Page):
 
     confirm_dialog = ft.AlertDialog(
         modal=True,
-        title=ft.Text("Confirmar Sobrescritura"),
-        content=ft.Text("El archivo o directorio ya existe en el destino. ¿Deseas sobreescribirlo?"),
+        title=ft.Text("Confirmar Sobrescritura", color=ft.Colors.WHITE),
+        bgcolor="#003790",
+        content=ft.Text("El archivo o directorio ya existe en el destino. ¿Deseas sobreescribirlo?", color=ft.Colors.WHITE70),
         actions=[
-            ft.TextButton("Sí, Sobrescribir", on_click=handle_confirm_yes),
-            ft.TextButton("No, Cancelar", on_click=handle_confirm_no),
+            ft.FilledButton("Sí, Sobrescribir", icon=ft.Icons.CHECK, on_click=handle_confirm_yes, style=ft.ButtonStyle(bgcolor="#e57373", color=ft.Colors.WHITE)),
+            ft.FilledButton("No, Cancelar", icon=ft.Icons.CANCEL, on_click=handle_confirm_no, style=ft.ButtonStyle(bgcolor="#2289ff", color=ft.Colors.WHITE)),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
     )
     page.overlay.append(confirm_dialog)
 
-    # ─── Diálogo: Crear Archivo (FILE) ────────────────────────────────────────
+    # ─── Diálogo: Crear Archivo (FILE) - VERSIÓN DINÁMICA ─────────────────────
+    def show_file_editor(initial_path: str, initial_content: str):
+        active_task = None
 
-    file_dialog_name_input = ft.TextField(
-        label="Nombre del archivo",
-        hint_text="ejemplo.txt  o  docs/notas.txt",
-        bgcolor="#14315e",
-        color=ft.Colors.WHITE,
-        label_style=ft.TextStyle(color="#ffd54f"),
-        border_color="#2289ff",
-        focused_border_color="#81c784",
-        cursor_color="#81c784",
-        text_style=ft.TextStyle(font_family="monospace"),
-    )
-    file_dialog_content_input = ft.TextField(
-        label="Contenido del archivo",
-        hint_text="Escriba el contenido aquí...",
-        multiline=True,
-        min_lines=9,
-        max_lines=14,
-        bgcolor="#14315e",
-        color=ft.Colors.WHITE,
-        label_style=ft.TextStyle(color="#ffd54f"),
-        border_color="#2289ff",
-        focused_border_color="#81c784",
-        cursor_color="#81c784",
-        text_style=ft.TextStyle(font_family="monospace"),
-    )
+        async def auto_close_banner():
+            try:
+                await asyncio.sleep(5.0)
+                error_banner.visible = False
+                page.update()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
-    def handle_file_dialog_create(e):
-        nonlocal pending_action
-        path    = (file_dialog_name_input.value or "").strip()
-        content = file_dialog_content_input.value or ""
+        def close_error_banner(e=None):
+            nonlocal active_task
+            if active_task:
+                active_task.cancel()
+                active_task = None
+            error_banner.visible = False
+            try:
+                page.update()
+            except Exception:
+                pass
 
-        if not path:
-            file_dialog_name_input.error_text = "El nombre no puede estar vacío."
-            page.update()
-            return
+        error_banner = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.WHITE),
+                ft.Text("", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, font_family="monospace", expand=True),
+                ft.IconButton(
+                    icon=ft.Icons.CLOSE,
+                    icon_color=ft.Colors.WHITE,
+                    tooltip="Cerrar",
+                    on_click=close_error_banner,
+                    icon_size=18,
+                    padding=0
+                )
+            ]),
+            bgcolor="#e57373", padding=10, border_radius=8, visible=False
+        )
+        name_label = ft.Text("Nombre del archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, font_family="monospace")
+        name_input = ft.TextField(
+            hint_text="Ingrese el nombre del archivo...",
+            hint_style=ft.TextStyle(color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE), font_family="monospace"),
+            bgcolor="#14315e",
+            color=ft.Colors.WHITE,
+            border_color="#2289ff",
+            focused_border_color="#81c784",
+            cursor_color="#81c784",
+            text_style=ft.TextStyle(font_family="monospace"),
+            border_radius=8,
+            value=initial_path
+        )
+        content_label = ft.Text("Contenido del archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, font_family="monospace")
+        content_input = ft.TextField(
+            hint_text="Ingrese el contenido del archivo...",
+            hint_style=ft.TextStyle(color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE), font_family="monospace"),
+            multiline=True,
+            min_lines=15,
+            max_lines=25,
+            expand=True,
+            bgcolor="#14315e",
+            color=ft.Colors.WHITE,
+            border_color="#2289ff",
+            focused_border_color="#81c784",
+            cursor_color="#81c784",
+            text_style=ft.TextStyle(font_family="monospace"),
+            border_radius=8,
+            value=initial_content,
+            autofocus=True
+        )
 
-        file_dialog_name_input.error_text = None
+        def handle_save(e):
+            nonlocal pending_action, active_task
+            path = (name_input.value or "").strip()
+            content = content_input.value or ""
+            if active_task:
+                active_task.cancel()
+                active_task = None
+            error_banner.visible = False
+            if not path:
+                name_input.error_text = "El nombre no puede estar vacío."
+                name_input.update()
+                return
+            name_input.error_text = None
+            try:
+                result = fs.cmd_file(path, content, overwrite=False)
+                log_area.controls.append(ft.Text(result, color="#81c784", font_family="monospace"))
+                update_ui()
+                close_dialog(dlg)
+            except FileExistsConflictException as fec:
+                close_dialog(dlg)
+                pending_action = lambda ow: fs.cmd_file(path, content, overwrite=ow)
+                confirm_dialog.open = True
+                page.update()
+            except FileSystemException as ex:
+                msg = str(ex)
+                display_msg = msg if msg.startswith("Error") else f"Error: {msg}"
+                error_banner.content.controls[1].value = display_msg
+                error_banner.visible = True
+                
+                if active_task:
+                    active_task.cancel()
+                
+                active_task = page.run_task(auto_close_banner)
+                dlg.update()
+            except Exception:
+                pass
 
-        try:
-            result = fs.cmd_file(path, content, overwrite=False)
-            file_creation_dialog.open = False
-            log_area.controls.append(ft.Text(result, color="#81c784", font_family="monospace"))
-            update_ui()
-        except FileExistsConflictException:
-            file_creation_dialog.open = False
-            _p, _c = path, content
-            pending_action = lambda ow: fs.cmd_file(_p, _c, overwrite=ow)
-            confirm_dialog.open = True
-        except FileSystemException as ex:
-            file_dialog_name_input.error_text = str(ex)
-        page.update()
+        def handle_cancel(e):
+            nonlocal active_task
+            if active_task:
+                active_task.cancel()
+                active_task = None
+            close_dialog(dlg)
 
-    def handle_file_dialog_cancel(e):
-        file_creation_dialog.open = False
-        file_dialog_name_input.error_text = None
-        page.update()
-
-    file_creation_dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text("Crear Nuevo Archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
-        bgcolor="#003790",
-        content=ft.Container(
-            content=ft.Column(
-                [file_dialog_name_input, file_dialog_content_input],
-                spacing=12,
-                tight=True,
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [ft.Icon(ft.Icons.NOTE_ADD, color="#ffd54f"), ft.Text("Editor de Archivos", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)],
+                alignment=ft.MainAxisAlignment.START
             ),
-            width=530,
-            padding=ft.Padding.only(top=8),
-        ),
-        actions=[
-            ft.TextButton(
-                "Cancelar",
-                on_click=handle_file_dialog_cancel,
-                style=ft.ButtonStyle(color="#e57373"),
+            bgcolor="#003790",
+            content=ft.Container(
+                content=ft.Column(
+                    [error_banner, name_label, name_input, content_label, content_input],
+                    spacing=10, tight=True,
+                ),
+                width=680, padding=ft.Padding.all(5),
             ),
-            ft.TextButton(
-                "Crear Archivo",
-                on_click=handle_file_dialog_create,
-                style=ft.ButtonStyle(color="#81c784"),
-            ),
-        ],
-        actions_alignment=ft.MainAxisAlignment.END,
-    )
-    page.overlay.append(file_creation_dialog)
+            actions=[
+                ft.FilledButton("Cancelar", icon=ft.Icons.CANCEL, on_click=handle_cancel, style=ft.ButtonStyle(bgcolor="#e57373", color=ft.Colors.WHITE)),
+                ft.FilledButton("Guardar Archivo", icon=ft.Icons.SAVE, on_click=handle_save, style=ft.ButtonStyle(bgcolor="#81c784", color="#003790")),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        open_dialog(dlg)
 
     # ─── Diálogo: Modificar Archivo (MODFILE) ─────────────────────────────────
+
+    modfile_task = None
+
+    async def auto_close_modfile_banner():
+        try:
+            await asyncio.sleep(5.0)
+            modfile_error_banner.visible = False
+            page.update()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    def close_modfile_error_banner(e=None):
+        nonlocal modfile_task
+        if modfile_task:
+            modfile_task.cancel()
+            modfile_task = None
+        modfile_error_banner.visible = False
+        try:
+            page.update()
+        except Exception:
+            pass
+
+    modfile_error_banner = ft.Container(
+        content=ft.Row([
+            ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.WHITE),
+            ft.Text("", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, font_family="monospace", expand=True),
+            ft.IconButton(
+                icon=ft.Icons.CLOSE,
+                icon_color=ft.Colors.WHITE,
+                tooltip="Cerrar",
+                on_click=close_modfile_error_banner,
+                icon_size=18,
+                padding=0
+            )
+        ]),
+        bgcolor="#e57373", padding=10, border_radius=8, visible=False
+    )
 
     modfile_target_path  = [""]
     modfile_path_label   = ft.Text(
         "", color="#ffd54f", size=13, font_family="monospace", italic=True
     )
+    modfile_content_label = ft.Text("Contenido del archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, font_family="monospace")
     modfile_content_input = ft.TextField(
-        label="Contenido del archivo",
+        hint_text="Ingrese el contenido del archivo...",
+        hint_style=ft.TextStyle(color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE), font_family="monospace"),
         multiline=True,
         min_lines=9,
         max_lines=14,
         bgcolor="#14315e",
         color=ft.Colors.WHITE,
-        label_style=ft.TextStyle(color="#ffd54f"),
         border_color="#2289ff",
         focused_border_color="#81c784",
         cursor_color="#81c784",
         text_style=ft.TextStyle(font_family="monospace"),
+        width=650,
     )
 
     def handle_modfile_save(e):
+        nonlocal modfile_task
         content = modfile_content_input.value or ""
+        if modfile_task:
+            modfile_task.cancel()
+            modfile_task = None
+        modfile_error_banner.visible = False
         try:
             result = fs.cmd_modfile(modfile_target_path[0], content)
             modfile_dialog.open = False
-            modfile_content_input.error_text = None
             log_area.controls.append(ft.Text(result, color="#81c784", font_family="monospace"))
             update_ui()
         except FileSystemException as ex:
-            modfile_content_input.error_text = str(ex)
+            msg = str(ex)
+            display_msg = msg if msg.startswith("Error") else f"Error: {msg}"
+            modfile_error_banner.content.controls[1].value = display_msg
+            modfile_error_banner.visible = True
+            
+            modfile_task = page.run_task(auto_close_modfile_banner)
+            modfile_dialog.update()
+            return
         page.update()
 
     def handle_modfile_cancel(e):
+        nonlocal modfile_task
+        if modfile_task:
+            modfile_task.cancel()
+            modfile_task = None
         modfile_dialog.open = False
         modfile_content_input.error_text = None
+        modfile_error_banner.visible = False
         page.update()
 
     modfile_dialog = ft.AlertDialog(
         modal=True,
-        title=ft.Text("Modificar Archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+        title=ft.Row(
+            [ft.Icon(ft.Icons.EDIT_DOCUMENT, color="#ffd54f"), ft.Text("Modificar Archivo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)],
+            alignment=ft.MainAxisAlignment.START
+        ),
         bgcolor="#003790",
         content=ft.Container(
             content=ft.Column(
-                [modfile_path_label, modfile_content_input],
+                [modfile_error_banner, modfile_path_label, modfile_content_label, modfile_content_input],
                 spacing=12,
                 tight=True,
             ),
-            width=530,
-            padding=ft.Padding.only(top=8),
+            width=680,
+            padding=ft.Padding.all(10),
         ),
         actions=[
-            ft.TextButton(
+            ft.FilledButton(
                 "Cancelar",
+                icon=ft.Icons.CANCEL,
                 on_click=handle_modfile_cancel,
-                style=ft.ButtonStyle(color="#e57373"),
+                style=ft.ButtonStyle(bgcolor="#e57373", color=ft.Colors.WHITE),
             ),
-            ft.TextButton(
+            ft.FilledButton(
                 "Guardar Cambios",
+                icon=ft.Icons.SAVE,
                 on_click=handle_modfile_save,
-                style=ft.ButtonStyle(color="#81c784"),
+                style=ft.ButtonStyle(bgcolor="#81c784", color=ft.Colors.WHITE),
             ),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
+        shape=ft.RoundedRectangleBorder(radius=12)
     )
     page.overlay.append(modfile_dialog)
 
@@ -349,29 +485,45 @@ def main(page: ft.Page):
         Retorna el mensaje de resultado para mostrar en el log.
         """
         nonlocal pending_action
-        parts = cmd_str.split()
+        try:
+            parts = shlex.split(cmd_str, posix=False)
+            parts = [p.strip('"\'') for p in parts]
+        except ValueError as e:
+            raise FileSystemException(f"Error en el comando: {str(e)}")
+            
         if not parts:
             return ""
         
         main_cmd = parts[0].upper()
 
+        if main_cmd not in ["HELP", "CREATE"]:
+            if not fs.disk.is_initialized:
+                raise FileSystemException("El disco virtual no está inicializado. Use CREATE primero.")
+
         if main_cmd == "HELP":
-            return (
-                "Comandos disponibles:\n"
-                "  CREATE <sectores> <tamaño>              - Inicializa el disco virtual\n"
-                "  FILE [nombre.ext]                       - Crea un archivo (abre editor)\n"
-                "  MODFILE <ruta>                          - Modifica contenido de un archivo\n"
-                "  VERFILE <ruta>                          - Muestra contenido de un archivo\n"
-                "  VERPROPIEDADES <ruta>                   - Muestra propiedades de un elemento\n"
-                "  MKDIR <ruta>                            - Crea un directorio (soporta rutas)\n"
-                "  CD <ruta>                               - Cambia de directorio (.., ., absoluta)\n"
-                "  LSDIR [ruta]                            - Lista contenido del directorio\n"
-                "  FIND <patrón> [ruta]                    - Busca archivos (soporta * y ?)\n"
-                "  MOVER <origen> <destino>                - Mueve o renombra archivo/directorio\n"
-                "  REMOVE <ruta>                           - Elimina archivo o directorio\n"
-                "  COPY <ruta_origen> <ruta_destino>       - Copia archivos (Real<->Virt, Virt<->Virt)\n"
-                "  HELP                                    - Muestra esta ayuda"
-            )
+            cmds = [
+                ("CREATE <sectores> <tamaño>", "Inicializa el disco virtual"),
+                ("FILE [nombre.ext]", "Crea un archivo (abre editor)"),
+                ("MODFILE <ruta>", "Modifica contenido de un archivo"),
+                ("VERFILE <ruta>", "Muestra contenido de un archivo"),
+                ("VERPROPIEDADES <ruta>", "Muestra propiedades de un elemento"),
+                ("MKDIR <ruta>", "Crea un directorio (soporta rutas)"),
+                ("CAMBIARDIR <ruta>", "Cambia de directorio (.., ., absoluta)"),
+                ("LISTARDIR [ruta]", "Lista contenido del directorio"),
+                ("TREE", "Muestra la estructura de árbol del File System"),
+                ("FIND <patrón> [ruta]", "Busca archivos (soporta * y ?)"),
+                ("MOVER <origen> <destino>", "Mueve o renombra archivo/directorio"),
+                ("REMOVE <ruta>", "Elimina archivo o directorio"),
+                ("COPY <origen> <destino>", "Copia (Real->Virt, Virt->Real, Virt->Virt)"),
+                ("MAPA", "Muestra el estado de la FAT"),
+                ("HELP", "Muestra esta ayuda")
+            ]
+            help_lines = ["Comandos disponibles:"]
+            for cmd, desc in cmds:
+                # Se calcula la cantidad de espacios necesarios para que quede parejito (hasta la columna 40)
+                espacios = " " * (40 - len(cmd))
+                help_lines.append(f"  {cmd}{espacios}- {desc}")
+            return "\n".join(help_lines)
 
         elif main_cmd == "CREATE":
             if len(parts) < 3:
@@ -384,12 +536,19 @@ def main(page: ft.Page):
             return fs.cmd_create(sectores, tamano)
 
         elif main_cmd == "FILE":
-            # Abrir diálogo de creación; pre-llenar nombre si se pasó como argumento
-            file_dialog_name_input.value = parts[1] if len(parts) > 1 else ""
-            file_dialog_content_input.value = ""
-            file_dialog_name_input.error_text = None
-            file_creation_dialog.open = True
-            page.update()
+            target_path = parts[1] if len(parts) > 1 else ""
+            if not target_path and fs.disk.is_initialized and fs.disk.get_free_sectors_count() == 0:
+                raise FileSystemException("El disco está lleno. No hay espacio para archivos nuevos.")
+                
+            loaded_content = ""
+            if target_path and fs.disk.is_initialized:
+                target_node = fs.resolve_virtual_path(target_path)
+                if not target_node and fs.disk.get_free_sectors_count() == 0:
+                    raise FileSystemException("El disco está lleno. No hay espacio para archivos nuevos.")
+                if target_node and not target_node.is_directory:
+                    loaded_content = fs.read_virtual_file_content(target_node).decode("utf-8", errors="replace")
+            
+            show_file_editor(target_path, loaded_content)
             return ""
 
         elif main_cmd == "MODFILE":
@@ -401,14 +560,19 @@ def main(page: ft.Page):
                 raise FileSystemException(f"El archivo '{_path}' no existe.")
             if _target.is_directory:
                 raise FileSystemException(f"'{_path}' es un directorio, no un archivo.")
-            if not fs.disk.is_initialized:
-                raise FileSystemException("El disco virtual no está inicializado.")
             # Pre-llenar con el contenido actual y abrir diálogo
             current_content = fs.read_virtual_file_content(_target).decode("utf-8", errors="replace")
             modfile_target_path[0]        = _path
             modfile_path_label.value      = f"Editando: {fs.get_path_for_node(_target)}"
             modfile_content_input.value   = current_content
             modfile_content_input.error_text = None
+            
+            nonlocal modfile_task
+            if modfile_task:
+                modfile_task.cancel()
+                modfile_task = None
+            modfile_error_banner.visible = False
+            
             modfile_dialog.open = True
             page.update()
             return ""
@@ -433,14 +597,17 @@ def main(page: ft.Page):
                 raise FileSystemException("Sintaxis incorrecta. Uso: MKDIR <nombre_directorio>")
             return fs.cmd_mkdir(parts[1])
 
-        elif main_cmd == "CD":
+        elif main_cmd == "CAMBIARDIR":
             if len(parts) < 2:
-                raise FileSystemException("Sintaxis incorrecta. Uso: CD <ruta_virtual>")
+                raise FileSystemException("Sintaxis incorrecta. Uso: CAMBIARDIR <ruta_virtual>")
             return fs.cmd_cd(parts[1])
 
-        elif main_cmd == "LSDIR":
+        elif main_cmd == "LISTARDIR":
             path_arg = parts[1] if len(parts) > 1 else None
             return fs.cmd_lsdir(path_arg)
+
+        elif main_cmd == "TREE":
+            return fs.cmd_tree()
 
         elif main_cmd == "FIND":
             if len(parts) < 2:
@@ -451,8 +618,16 @@ def main(page: ft.Page):
 
         elif main_cmd == "REMOVE":
             if len(parts) < 2:
-                raise FileSystemException("Sintaxis incorrecta. Uso: REMOVE <ruta>")
-            return fs.cmd_remove(parts[1])
+                raise FileSystemException("Sintaxis incorrecta. Uso: REMOVE <ruta> [ruta2 ...]")
+            
+            results = []
+            for path_arg in parts[1:]:
+                try:
+                    res = fs.cmd_remove(path_arg)
+                    results.append(res)
+                except FileSystemException as e:
+                    results.append(f"Error al eliminar '{path_arg}': {str(e)}")
+            return "\n".join(results)
 
         elif main_cmd == "COPY":
             if len(parts) < 3:
@@ -467,6 +642,9 @@ def main(page: ft.Page):
                 confirm_dialog.open = True
                 page.update()
                 raise fec
+
+        elif main_cmd == "MAPA":
+            return fs.cmd_mapa()
 
         else:
             raise FileSystemException(f"Comando '{main_cmd}' no reconocido o responsabilidad de otro módulo.")
