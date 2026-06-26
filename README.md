@@ -1,114 +1,172 @@
-# Emulador de File System
+# Emulador de File System Virtual con Asignación Enlazada
 
-Este proyecto consiste en el diseño e implementación de un emulador de sistema de archivos (File System) virtual estructurado en sectores y enlazado, desarrollado con fines didácticos para la cátedra de Sistemas Operativos del Instituto Tecnológico de Costa Rica (Semestre I - 2026).
+**Curso:** Sistemas Operativos (Escuela de Computación)  
+**Institución:** Instituto Tecnológico de Costa Rica (ITCR)  
+**Profesora:** Ing. Erika Marín Schumann  
+**Semestre:** I Semestre 2026  
 
-El software proporciona una interfaz gráfica interactiva que representa la estructura jerárquica de archivos y directorios en memoria (representada como un árbol visual), respaldada por un almacenamiento persistente en un archivo binario (`disk.bin`) que actúa como el disco físico simulado.
+## Integrantes
+
+| Nombre                      | Carnet     |
+|-----------------------------|------------|
+| Daniel Alemán Ruiz          | 2023051957 |
+| Joseph Arrieta Mora         | 2023020875 |
+| Sebastián Rodríguez Sánchez | 2023074446 |
 
 ---
 
-## 📋 Requisitos del Proyecto e Implementación
+## Descripción General
 
-De acuerdo con las especificaciones solicitadas, se han incorporado los siguientes lineamientos de diseño en el núcleo de la aplicación:
+Este proyecto implementa un **emulador de sistema de archivos (File System)** virtual con estructura jerárquica de directorios y almacenamiento respaldado en un archivo binario (`disk.bin`) que actúa como el disco físico simulado.
 
-| Requisito | Estado | Mecanismo de Implementación |
+El sistema emplea una **Tabla de Asignación de Archivos (FAT)** gestionada en memoria, con asignación de sectores mediante el algoritmo **First Fit** y encadenamiento de bloques de forma **enlazada**, lo que permite fragmentación no contigua. La interfaz gráfica, construida con **Flet**, ofrece una terminal interactiva con árbol de directorios dinámico y visualización de la ruta actual en todo momento.
+
+---
+
+## Requisitos de Diseño Implementados
+
+| Requisito | Estado | Mecanismo |
 | :--- | :---: | :--- |
-| **Asignación Enlazada** | **Completado** | La estructura de archivos se enlaza en memoria mediante una tabla de asignación de archivos (FAT) simulada. Cada sector apunta al siguiente índice lógico o a un marcador de fin de archivo (EOF). |
-| **Algoritmo First Fit** | **Completado** | Para la asignación de sectores, el sistema escanea de manera lineal la tabla de asignación desde el sector inicial `0` y toma el primer conjunto de sectores libres que satisfagan la solicitud de espacio. |
-| **Control de Sectores Vacíos** | **Completado** | Se realiza el seguimiento dinámico de sectores disponibles (inicializados en `-1` en la FAT). El espacio se reclama y se libera en tiempo real mediante algoritmos de asignación y desasignación. |
-| **Soporte No Contiguo** | **Completado** | Al ser una asignación enlazada, los archivos virtuales se pueden fragmentar y almacenar en sectores dispersos del disco virtual cuando no hay espacio contiguo disponible. |
-| **Persistencia Física** | **Completado** | Se escribe físicamente en un archivo binario de tamaño predefinido (`disk.bin`). Al cerrar la aplicación, la jerarquía lógica en memoria se reinicia, pero los datos binarios persisten en el disco simulado. |
+| **Asignación Enlazada** | ✅ Completado | La FAT en memoria encadena sectores: cada sector apunta al siguiente o a EOF (`-2`). |
+| **Algoritmo First Fit** | ✅ Completado | `find_free_sectors` escanea linealmente la FAT desde el sector `0` hasta encontrar la cantidad requerida de bloques libres. |
+| **Control de Sectores Vacíos** | ✅ Completado | La FAT se inicializa con `-1` (libre). Al liberar un archivo, se restauran los sectores a `-1`. |
+| **Almacenamiento No Contiguo** | ✅ Completado | Los sectores asignados no necesitan ser contiguos; los punteros de la FAT los encadenan. |
+| **Persistencia Física** | ✅ Completado | Los datos se escriben en `file-system/disk.bin`. Al cerrar la aplicación, el archivo binario persiste pero la jerarquía lógica en memoria se reinicia. |
+| **Seguridad de Nombres Duplicados** | ✅ Completado | Si el nombre ya existe, se lanza `FileExistsConflictException` y se solicita confirmación de sobrescritura. |
+| **Aviso de Disco Lleno** | ✅ Completado | Se lanza `DiskFullException` si no hay sectores libres suficientes para el archivo nuevo. |
 
 ---
 
-## 🏗️ Arquitectura y Componentes Completados (Núcleo)
+## Estructura del Proyecto
 
-Se ha desarrollado la arquitectura base del sistema, que comprende los siguientes módulos funcionales:
-
-### 1. Interfaz Gráfica de Usuario (GUI)
-Desarrollada utilizando **Flet** bajo un diseño moderno de alta fidelidad:
-* **Estructura Dinámica (TREE):** Ubicada en el panel lateral izquierdo, muestra de forma gráfica y en tiempo real el árbol completo de directorios y archivos. Resalta visualmente el directorio de trabajo actual y los tipos de elementos (carpetas vs. archivos).
-* **Terminal Integrada:** Soporta comandos interactivos con atajos de teclado estándar de entornos Unix:
-  * Historial de comandos mediante las flechas de navegación ($\uparrow$ / $\downarrow$).
-  * Combinaciones de teclas para edición rápida (`Ctrl+U` para limpiar línea, `Ctrl+W` para borrar palabra anterior, `Ctrl+K` para truncar texto).
-  * Autocompletado inteligente de rutas virtuales con la tecla `Tab`.
-* **Ruta de Trabajo Dinámica:** Siempre visible en la parte superior de la ventana principal.
-
-### 2. Gestión de Almacenamiento Virtual (`core/virtual_disk.py`)
-Módulo encargado de la abstracción a bajo nivel del disco:
-* Creación física del disco simulado escribiendo bloques binarios vacíos de tamaño $N \times S$ bytes.
-* Implementación de operaciones atómicas de lectura (`read_sector`) y escritura (`write_sector`) de bloques.
-* Algoritmos First Fit para asignación y marcas de liberación en la tabla FAT del disco.
-
-
-### 3. Comando Principal de Copia (`core/file_system.py`)
-Implementación completa y robusta del comando `COPY` para los tres flujos requeridos:
-* **Real a Virtual:** Lee un archivo del sistema operativo de la máquina y lo escribe fragmentado en sectores virtuales del disco.
-* **Virtual a Real:** Reconstruye un archivo leyendo secuencialmente los sectores virtuales del disco simulado y genera un archivo binario nativo en la máquina host.
-* **Virtual a Virtual:** Clona y enlaza información entre nodos del árbol virtual asignando nuevos bloques físicos en disco.
-* *Nota:* Incluye control de colisiones. Si el destino ya existe, el sistema pausa la ejecución y despliega un diálogo gráfico preguntando al usuario si desea sobreescribir el elemento.
-
-### 4. Documentación Asociada (Daniel)
-* **Estrategia de Solución:** Redacción formal de la arquitectura lógica y física empleada.
-* **Bitácora de Trabajo:** Registro cronológico de actividades y reuniones de las tres semanas.
+```
+/flet-file-system
+├── main.py                # Interfaz gráfica (Flet) y dispatcher de comandos
+├── README.md              # Este archivo
+├── /core
+│   ├── file_system.py     # Lógica del FS: FSNode, FileSystem, comandos
+│   └── virtual_disk.py    # Disco virtual: FAT, First Fit, lectura/escritura
+├── /file-system
+│   └── disk.bin           # Archivo binario del disco simulado (generado en runtime)
+└── /assets
+    └── fs_icon.png        # Ícono de la aplicación
+```
 
 ---
 
-## 🛠️ Guía de Integración (Desarrollo Pendiente)
+## Arquitectura y Componentes
 
-El proyecto cuenta con placeholders y firmas predefinidas para facilitar la integración de los componentes restantes a cargo del equipo de trabajo.
+### 1. Interfaz Gráfica (`main.py`)
 
-### Flujo de Registro de Nuevos Comandos
-Para añadir un comando nuevo, se deben seguir los siguientes pasos:
-1. Implementar la lógica de negocio en el archivo **file_system.py**
-2. Capturar la instrucción dentro de la función `execute_command_logic` en **main.py** y llamar al método correspondiente del backend.
-3. Retornar una cadena de texto confirmando el éxito o los detalles del proceso para que la GUI los imprima en la consola.
+Desarrollada con **Flet** bajo un diseño moderno de alta fidelidad:
 
-### Módulos y Documentación a Integrar
+- **Árbol de Directorios (TREE):** Panel lateral izquierdo con visualización en tiempo real de la jerarquía completa. Resalta visualmente el directorio actual (`◄`), diferencia carpetas (`📁`) de archivos (`📄`) y usa colores distintos por tipo.
+- **Terminal Integrada:** Soporta comandos interactivos con atajos de teclado estilo Unix:
+  - Historial de comandos con `↑` / `↓`.
+  - `Ctrl+U` para limpiar la línea, `Ctrl+W` para borrar la última palabra, `Ctrl+K` para truncar.
+  - Autocompletado de rutas virtuales con `Tab`.
+- **Ruta Actual Dinámica:** Visible en el encabezado en todo momento.
+- **Diálogos Gráficos:** Confirmación de sobrescritura, editor de archivos (FILE/MODFILE) con validación inline.
 
-#### 📌 Sección de Rutas y Directorios (Sebastian)
-##### Desarrollo Técnico:
-1. **MKDIR:** Completar la validación de directorios para evitar nombres duplicados dentro de una misma ruta y permitir la creación de rutas anidadas.
-2. **CD (CambiarDIR):** Implementar la lógica para cambiar el directorio actual de trabajo, soportando navegación absoluta, relativa (`.`, `..`) y rutas largas.
-3. **ListarDIR:** Retornar y formatear la lista de elementos hijos de la ruta de trabajo para imprimirlos en consola con sus correspondientes marcadores de tipo.
-4. **FIND:** Buscar un archivo o directorio por coincidencia exacta o comodines (ej. `*.txt`) recorriendo el árbol virtual y listar todas las rutas donde se localice.
-5. **ReMove:** Eliminar archivos y carpetas de forma recursiva en la jerarquía, asegurando que se liberen los sectores correspondientes en la FAT mediante `self.disk.free_file_sectors()`.
+### 2. Disco Virtual (`core/virtual_disk.py`)
 
-##### Documentación Asociada:
-* **Casos de Prueba:** Definir y detallar cada prueba (entradas, resultados esperados y obtenidos) para evaluar la funcionalidad completa del programa.
-* **Manual de Usuario:** Redactar el manual técnico y de uso con las instrucciones para compilar y correr la tarea.
+Módulo de abstracción a bajo nivel:
 
-#### 📌 Sección de Operaciones de Archivos (Joseph)
-##### Desarrollo Técnico:
-1. **FILE:** Crear un archivo virtual solicitando el contenido inicial en la consola de comandos. Debe instanciar el nodo e invocar al método `write_virtual_file_content`.
-2. **ModFILE:** Buscar un archivo virtual determinado y sobreescribir su contenido reasignando sectores libres en la FAT.
-3. **VerFile:** Cargar un archivo virtual a partir de sus sectores enlazados y mostrar su representación en formato texto en la terminal gráfica.
-4. **VerPropiedades:** Extraer los metadatos almacenados en el nodo `FSNode` de un archivo (Nombre, Extensión, Tamaño en bytes, Fecha de Creación y Modificación) y presentarlos formalmente.
-5. **MoVer:** Desplazar un archivo o carpeta hacia otra ruta o renombrarlo en caliente alterando su relación de jerarquía en el árbol de directorios.
+- **`create_disk(num_sectors, sector_size)`:** Crea físicamente el archivo `disk.bin` con `num_sectors × sector_size` bytes en ceros e inicializa la FAT.
+- **`read_sector(i)` / `write_sector(i, data)`:** Operaciones atómicas de I/O por bloque.
+- **`find_free_sectors(n)`:** Implementación de **First Fit** — escanea secuencialmente y retorna los primeros `n` sectores libres (`fat[i] == -1`).
+- **`allocate_file_sectors(size_bytes)`:** Calcula sectores necesarios, los busca con First Fit y los enlaza en la FAT.
+- **`free_file_sectors(start)`:** Libera la cadena entera de sectores de un archivo.
+- **`get_free_sectors_count()`:** Retorna el total de sectores disponibles.
 
-##### Documentación Asociada:
-* **Análisis de Resultados:** Elaborar el listado de las tareas y actividades del proyecto a nivel funcional, detallando y justificando sus porcentajes de realización.
+### 3. File System Lógico (`core/file_system.py`)
+
+Capa de alto nivel:
+
+- **`FSNode`:** Nodo del árbol (archivo o directorio). Almacena nombre, padre, hijos, `first_sector`, `size`, fechas de creación y modificación.
+- **`FileSystem`:** Raíz del árbol y directorio actual. Implementa todos los comandos del sistema.
+- **Resolución de rutas:** Soporte para rutas absolutas (`/dir/subdir`), relativas (`.`, `..`) y el alias `/root/...`.
+- **Excepciones:** `FileSystemException`, `DiskFullException`, `FileExistsConflictException`.
 
 ---
 
-## ▶️ Instrucciones de Ejecución
+## Comandos Disponibles
+
+| Comando | Sintaxis | Descripción |
+| :--- | :--- | :--- |
+| **CREATE** | `CREATE <sectores> <tamaño>` | Inicializa el disco virtual. |
+| **FILE** | `FILE [nombre.ext]` | Crea un archivo (abre el editor gráfico). |
+| **MKDIR** | `MKDIR <ruta>` | Crea un directorio (soporta rutas anidadas). |
+| **CAMBIARDIR** | `CAMBIARDIR <ruta>` | Cambia el directorio actual (`.`, `..`, absoluto, relativo). |
+| **LISTARDIR** | `LISTARDIR [ruta]` | Lista el contenido del directorio actual o de la ruta indicada. |
+| **MODFILE** | `MODFILE <ruta>` | Modifica el contenido de un archivo (abre el editor gráfico). |
+| **VERFILE** | `VERFILE <ruta>` | Muestra el contenido de un archivo en la terminal. |
+| **VERPROPIEDADES** | `VERPROPIEDADES <ruta>` | Muestra nombre, extensión, tamaño, fecha de creación y modificación. |
+| **COPY** | `COPY <origen> <destino>` | Copia archivos/directorios: Real→Virtual, Virtual→Real, Virtual→Virtual. |
+| **MOVER** | `MOVER <origen> <destino>` | Mueve o renombra archivos/directorios (funciona como `rename`). |
+| **REMOVE** | `REMOVE <ruta> [ruta2 ...]` | Elimina archivos o directorios (recursivo para directorios). |
+| **FIND** | `FIND <patrón> [ruta_inicio]` | Busca por nombre (soporta comodines `*` y `?`). |
+| **TREE** | `TREE` | Imprime el árbol completo del File System en la terminal. |
+| **MAPA** | `MAPA` | Muestra el estado actual de la FAT (sectores libres/usados). |
+| **HELP** | `HELP` | Lista todos los comandos con su descripción. |
+
+---
+
+## Instrucciones de Ejecución
 
 ### Prerrequisitos
-Es necesario disponer de Python 3 y la biblioteca `flet` instalada:
+
+Python 3 y la biblioteca `flet`:
+
 ```bash
 pip install flet
 ```
 
-### Inicialización de la Aplicación
-Navegar al directorio del proyecto y ejecutar el archivo principal:
+### Iniciar la Aplicación
+
+Desde la raíz del proyecto:
+
 ```bash
-cd flet-file-system
 python main.py
 ```
 
-Al abrir la interfaz, configure e inicialice el tamaño del disco usando el comando `CREATE`:
+### Flujo Básico
+
 ```bash
-CREATE <cantidad_de_sectores> <tamaño_de_sector>
-# Ejemplo: CREATE 5000 512
+# 1. Inicializar el disco virtual (5000 sectores de 512 bytes = ~2.4 MB)
+CREATE 5000 512
+
+# 2. Crear directorios
+MKDIR documentos
+MKDIR documentos/fotos
+
+# 3. Crear archivos (abre el editor gráfico)
+FILE documentos/notas.txt
+
+# 4. Navegar
+CAMBIARDIR documentos
+LISTARDIR
+
+# 5. Ver propiedades y contenido
+VERPROPIEDADES notas.txt
+VERFILE notas.txt
+
+# 6. Copiar un archivo real al FS virtual
+COPY C:\Users\usuario\archivo.txt /documentos/archivo.txt
+
+# 7. Buscar archivos
+FIND *.txt
+
+# 8. Ver árbol completo
+TREE
 ```
 
-Una vez creado, podrá utilizar los comandos soportados del sistema (consulte el comando `HELP` en la consola para obtener más información).
+---
+
+## Notas de Diseño
+
+- **Fragmentación interna:** Al ser asignación enlazada, el último sector de un archivo puede estar parcialmente vacío (relleno con `\x00`).
+- **Persistencia:** Al cerrar la app, el árbol lógico en memoria se pierde, pero `disk.bin` permanece en disco.
+- **Ruta virtual siempre visible:** El encabezado de la interfaz muestra la ruta actual en todo momento.
+- **Comodines en FIND:** Se soportan patrones como `*.txt`, `nota?`, `doc*`.
+- **MOVER como rename:** `MOVER archivo.txt nuevo_nombre.txt` renombra el archivo en el mismo directorio.
